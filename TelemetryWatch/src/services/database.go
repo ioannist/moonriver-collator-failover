@@ -26,6 +26,7 @@ type Session struct {
 	Session      string `json:"session"`      // encrypted session key
 	Priority     int    `json:"priority"`     // higher priority gets activated first
 	Transactions string `json:"transactions"` // encrypted presigned raw reassociation transactions
+	Proxy        string `json:"proxy"`        // the proxy account address
 	// not stored in DB (local)
 	Stopped   bool // true if removed association automatically
 	NotSynced bool

@@ -8,10 +8,11 @@
   "license": "ISC",
   "dependencies": {
     "aws-sdk": "2.952.0",
-    "@polkadot/api": "^6.4.2",
-    "@substrate/txwrapper-core": "1.2.18",
-    "@substrate/txwrapper-registry": "1.2.18",
-    "@substrate/txwrapper-substrate": "1.2.18"
+    "@polkadot/api": "6.10.1",
+    "moonbeam-types-bundle": "2.0.1",
+    "@substrate/txwrapper-core": "1.2.21",
+    "@substrate/txwrapper-registry": "1.2.21",
+    "@substrate/txwrapper-substrate": "1.2.21"
   },
   "devDependencies": {
     "ts-loader": "^9.2.4",

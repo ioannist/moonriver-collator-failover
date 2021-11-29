@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"movrfailover/services"
 	"net/http"
 	"time"
-
-	"movrfailover/services"
 )
 
 type WhosActive struct {
@@ -17,7 +16,7 @@ type WhosActive struct {
 	Nonce   int    `json:"nonce"`   // current account nonce
 }
 
-func failover(sessAlert *services.Session, candidates []*services.Session, whosActive *map[string]WhosActive) error {
+func failover(sessAlert *services.Session, candidates []*services.Session, whosActive *map[string]*WhosActive) error {
 	for _, sessCandidate := range candidates {
 		if !sessCandidate.NotSynced && !(*whosActive)[sessCandidate.Session].Active && sessCandidate.Priority > sessAlert.Priority && !sessAlert.Stopped {
 			// Request updateAssociation
@@ -123,7 +122,7 @@ This method calls a REST endpoint that accepts a list of session strings,
 and returns which of these sessions are active, and the associated account
 (public address) and their nonces for these active sessions
 **/
-func getActiveSessions(sessions []*services.Session) (map[string]WhosActive, error) {
+func getActiveSessions(sessions []*services.Session) (map[string]*WhosActive, error) {
 	apiKey, _, err := services.GetKeys()
 	if err != nil {
 		return nil, err
@@ -141,7 +140,7 @@ func getActiveSessions(sessions []*services.Session) (map[string]WhosActive, err
 	if err != nil {
 		return nil, err
 	}
-	answer := map[string]WhosActive{}
+	answer := map[string]*WhosActive{}
 	err = httpPost(jsonstr, &answer, apiKey, services.Config().REST_WHOS_SESSION)
 	if err != nil {
 		return nil, err
@@ -149,7 +148,56 @@ func getActiveSessions(sessions []*services.Session) (map[string]WhosActive, err
 	return answer, nil
 }
 
-func httpPost(jsonstr []byte, answer *map[string]WhosActive, apiKey string, endpoint string) error {
+func getAccountNonces(accounts []string) (map[string]int, error) {
+	apiKey, _, err := services.GetKeys()
+	if err != nil {
+		return nil, err
+	}
+	type NoncesRequest struct {
+		Accounts []string `json:"accounts"`
+	}
+	request := NoncesRequest{
+		Accounts: []string{},
+	}
+	for _, a := range accounts {
+		request.Accounts = append(request.Accounts, a)
+	}
+	jsonstr, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	answer := map[string]int{}
+	err = httpPostNonces(jsonstr, &answer, apiKey, services.Config().REST_WHOS_SESSION)
+	if err != nil {
+		return nil, err
+	}
+	return answer, nil
+}
+
+func httpPost(jsonstr []byte, answer *map[string]*WhosActive, apiKey string, endpoint string) error {
+	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonstr))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Api-Key", apiKey)
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	fmt.Println("response Status:", resp.Status)
+	// fmt.Println("response Headers:", resp.Header)
+	body, _ := ioutil.ReadAll(resp.Body)
+	fmt.Println("response Body:", string(body))
+	if resp.Status == "200 OK" && answer != nil {
+		err = json.Unmarshal(body, &answer)
+	}
+	return err
+}
+
+func httpPostNonces(jsonstr []byte, answer *map[string]int, apiKey string, endpoint string) error {
 	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonstr))
 	if err != nil {
 		return err

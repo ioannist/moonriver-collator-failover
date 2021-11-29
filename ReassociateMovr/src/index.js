@@ -1,6 +1,6 @@
 const AWS = require('aws-sdk')
 const { ApiPromise, WsProvider } = require("@polkadot/api");
-const { typesBundle } = require("./moonbeam-types-bundle");
+const { typesBundlePre900 } = require("moonbeam-types-bundle")
 const crypto = require("crypto");
 
 const badRequest = {
@@ -45,10 +45,6 @@ exports.handler = async (event) => {
     tx = await kmsDecrypt(tx) // shared key from kill account
     tx = decrypt(keyEnv, tx) // function's personal key stored in env
     tx = decrypt(keyCaller, tx) // telemetry watcher's secret
-    if (!tx.startsWith('movrfailover_')) {
-      throw Error('TX decryption failed')
-    }
-    tx = tx.substring(7, tx.length) // remove movrfailover_ from string
 
     console.log('Connecting to polkadot api')
     const polkadotApi = await providePolkadotApi();
@@ -120,7 +116,7 @@ async function providePolkadotApi() {
       api = await ApiPromise.create({
         initWasm: false,
         provider,
-        typesBundle: typesBundle,
+        typesBundle: typesBundlePre900,
       });
       return api
 

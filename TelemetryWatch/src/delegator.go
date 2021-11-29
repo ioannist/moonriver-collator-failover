@@ -26,7 +26,7 @@ func delegate(gpName string, ses []*services.Session) {
 		onAlert := []*services.Session{}
 		reassociateDo := false
 		notifyDo := false
-		whosActive := map[string]WhosActive{}
+		whosActive := map[string]*WhosActive{}
 		var err error
 
 		niMX.RLock()
@@ -38,12 +38,13 @@ func delegate(gpName string, ses []*services.Session) {
 		for _, session := range ses {
 			importedLag := maxImported-nodeImported[session.NodeName] > services.Config().IMPORTED_REASSOCIATE_THRESHOLD
 			finalizedLag := maxFinalized-nodeFinalized[session.NodeName] > services.Config().FINALIZED_REASSOCIATE_THRESHOLD
+
 			if importedLag || finalizedLag {
 				// if any node is lagging, we notify
 				notifyDo = true
 				session.NotSynced = true
 				if len(whosActive) == 0 { // request active sessions only if there is an issue
-					fmt.Println("Getting which sessions are active/associated and the nonces of their associated accounts")
+					fmt.Println("Getting which sessions are active/associated")
 					whosActive, err = getActiveSessions(ses)
 					if err != nil {
 						fmt.Printf("%v\n", err)
@@ -62,8 +63,22 @@ func delegate(gpName string, ses []*services.Session) {
 		if reassociateDo {
 			fmt.Println("Reassociation is required (associated node found to be lagging)")
 			for _, sessAlert := range onAlert { // these are active nodes that are not syncing
+				// we need the nonce of the proxy account, since we are using a proxy
+				// we can skip this step if we are not using proxy
+				fmt.Println("Getting nonce of proxy acount")
+				nonces, err := getAccountNonces([]string{sessAlert.Proxy})
+				if err != nil {
+					fmt.Printf("%v\n", err)
+					continue
+				}
+				if _, ok := nonces[sessAlert.Proxy]; !ok {
+					fmt.Println("Failed to find nonce!")
+					continue
+				}
+				whosActive[sessAlert.Session].Nonce = nonces[sessAlert.Proxy]
+
 				// find next available backup replacement
-				err := failover(sessAlert, ses, &whosActive)
+				err = failover(sessAlert, ses, &whosActive)
 				if err != nil {
 					fmt.Printf("%v\n", err)
 					continue
@@ -87,13 +102,13 @@ func delegate(gpName string, ses []*services.Session) {
 
 func notifyMe(message string) {
 	pm := services.PinpointMessage{
-		Subject:   "MOVRFAILOVER ALERT",
+		Subject:   "DIVNET ALERT",
 		EmailHTML: "<p>" + message + "</p>",
 		EmailTo:   "ioannis.tsiokos@gmail.com",
 	}
 	alerts <- pm
 	pms := services.PinpointMessage{
-		Subject:  "MOVRFAILOVER ALERT",
+		Subject:  "DIVNET ALERT",
 		SMSText:  message,
 		NumberTo: "+306936576875",
 	}

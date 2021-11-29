@@ -1,6 +1,7 @@
 const AWS = require('aws-sdk')
+const fs = require('fs');
 const { ApiPromise, Keyring, WsProvider } = require("@polkadot/api");
-const { typesBundle } = require("./moonbeam-types-bundle");
+const { typesBundlePre900 } = require("moonbeam-types-bundle")
 const crypto = require("crypto");
 const createSignedTx = require("@substrate/txwrapper-core/lib/core/construct").createSignedTx;
 const createSigningPayload = require("@substrate/txwrapper-core/lib/core/construct").createSigningPayload;
@@ -9,20 +10,24 @@ const getRegistry = require("@substrate/txwrapper-registry").getRegistry;
 const defineMethod = require('@substrate/txwrapper-core').defineMethod;
 const EXTRINSIC_VERSION = require("@polkadot/types/extrinsic/v4/Extrinsic").EXTRINSIC_VERSION;
 
-// secretkey_movrfailover1
-const keyCaller = 'YOUR_GREEN_KEY';
-const keyEnv = 'YOUR_GRAY_KEY';
-const gatekeeperAccessKeyID = 'YOUR_AWS_GATEKEEPER_IAM_ACCESS_KEY'; // orange key
-const gatekeeperSecret = 'YOUR_AWS_GATEKEEPER_IAM_SECRET'; // orange key
-const telemetryWatcherDynamoAccessKeyID = 'YOUR_AWS_TELEMETRYWATCHER_DYNAMO_IAM_ACCESS_KEY';
-const telemetryWatcherDynamoSecret = 'YOUR_AWS_TELEMETRY_WATCHER_DYANMO_IAM_SECRET';
-const account = 'YOUR_COLLATOR-PUBLIC-ADDRESS';
-const masterKey = 'YOUR-PROXY_PRIVATE_KEY' // red key
+let secretsData = JSON.parse(fs.readFileSync('secrets.json'));
+let accountData = JSON.parse(fs.readFileSync('accounts.json'));
 
-// const TX_VALIDITY_IN_DAYS = 30 * 1; // for how many days will this transaction be avlid
+// secretkey_movrfailover1
+const {
+  keyCaller,
+  keyEnv,
+  gatekeeperAccessKeyID,
+  gatekeeperSecret,
+  telemetryWatcherDynamoAccessKeyID,
+  telemetryWatcherDynamoSecret
+} = secretsData;
+const { collatorAccount, proxyAccount, proxyAccountPrivateKeyEncrypted } = accountData;
+const proxyType = "AuthorMapping";
+
+// const TX_VALIDITY_IN_DAYS = 30 * 1; // for how many days will this transaction be valid
 const NONCES_AHEAD = 30; // for how many nonces ahead of the current nonce should we generate valid transactions for
 const KMS_ARN = "arn:aws:kms:eu-central-1:XXXXXXXXXXXXXX:key/YOUR-KEY-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-const MOVR = 1_000_000_000_000_000_000n; // MOVR denomination
 
 var kms = new AWS.KMS(new AWS.Config({
   region: "eu-central-1",
@@ -48,7 +53,7 @@ let documentClient = new AWS.DynamoDB.DocumentClient(new AWS.Config({
  * Finally, it will save the encrypted signed transactions in the database for future use
  * Note that the transactions are never transmitted to the network, i.e. they are not executed.
  */
-(async function () {
+ (async function () {
   try {
     console.log('Getting sessions from db')
     const sessions = await scanSessions()
@@ -67,9 +72,16 @@ let documentClient = new AWS.DynamoDB.DocumentClient(new AWS.Config({
       }
     }
 
+    // we encrypt the tx with 3 keys sourced from different places/accounts
+    // none of these keys is stored in the AWS account that has the DB with the encrypted transactions
+    let masterKey = await kmsDecrypt(proxyAccountPrivateKeyEncrypted)
+    masterKey = decrypt(keyEnv, masterKey)
+    masterKey = '0x' + decrypt(keyCaller, masterKey)
+    console.log(`"${masterKey.substring(0, 5)}"`)
+
     console.log('Generating txs')
     // console.log(nodeNamesToSessionPairs)
-    const fromToTx = await makeOfflineTx(nodeNamesToSessionPairs);
+    const fromToTx = await makeOfflineTx(nodeNamesToSessionPairs, masterKey);
 
     console.log('Updating signed txs in db')
     console.log(fromToTx)
@@ -84,7 +96,8 @@ let documentClient = new AWS.DynamoDB.DocumentClient(new AWS.Config({
 })();
 
 
-async function makeOfflineTx(nodeNamesToSessionPairs) {
+
+async function makeOfflineTx(nodeNamesToSessionPairs, masterKey) {
   const api = await providePolkadotApi();
   await api.isReady;
   await new Promise((resolve) => {
@@ -95,7 +108,8 @@ async function makeOfflineTx(nodeNamesToSessionPairs) {
   const blockHash = (await api.rpc.chain.getBlockHash(block.header.number)).toHex();
   const genesisHash = (await api.rpc.chain.getBlockHash(0)).toHex();
   const metadataRpc = (await api.rpc.state.getMetadata()).toHex();
-  const nonce = +(await api.derive.balances.account(account)).accountNonce
+  // const nonce = +(await api.derive.balances.account(collatorAccount)).accountNonce // not needed if proxy
+  const nonceProxy = +(await api.derive.balances.account(proxyAccount)).accountNonce
 
   const { specVersion, transactionVersion, specName } = await api.rpc.state.getRuntimeVersion();
   const registry = getRegistry({
@@ -107,7 +121,8 @@ async function makeOfflineTx(nodeNamesToSessionPairs) {
 
   const blockNumber = registry.createType("BlockNumber", block.header.number).toNumber();
   // const eraPeriod = Math.floor(TX_VALIDITY_IN_DAYS * 24 * 60 * 60 / 12);
-  
+  console.log({ blockNumber, blockHash })
+
   const fromToTx = new Map()
   // make transactions for all nodes/sessions (this is the 'old' in authorMapping.updateAssociation)
   for (const [from, value] of nodeNamesToSessionPairs) {
@@ -119,17 +134,21 @@ async function makeOfflineTx(nodeNamesToSessionPairs) {
       // make a transaction for all future nonces, up to current + NONCES_AHEAD
       // this is necessary to ensure we can execute the transaction even if the nonce has changed
       const nonceTxs = [];
-      for (let n = nonce; n < nonce + NONCES_AHEAD; n++) {
+      for (let n = nonceProxy; n < nonceProxy + NONCES_AHEAD; n++) {
         console.log(`${from} -> ${to}, ${n}`)
-        const unsigned = getUpdateAssociationTx(
+        const txUpdate = api.tx.authorMapping
+          .updateAssociation(sessionFrom, sessionTo)
+
+        const unsignedProxy = getProxyTx(
           {
-            oldAuthorId: sessionFrom,
-            newAuthorId: sessionTo
+            real: collatorAccount,
+            forceProxyType: proxyType,
+            call: txUpdate.method.toHex() //unsigned.method
           },
           {
             // Read parameter descriptions at
             // https://github.com/paritytech/txwrapper-core/blob/b213cabf50f18f0fe710817072a81596e1a53cae/packages/txwrapper-core/src/types/method.ts
-            address: account,
+            address: proxyAccount,
             blockHash, // The checkpoint hash of the block, in hex.
             blockNumber, // The checkpoint block number (u32), in hex.
             eraPeriod: undefined, // number of blocks from checkpoint that transaction is valid
@@ -146,7 +165,7 @@ async function makeOfflineTx(nodeNamesToSessionPairs) {
           }
         );
 
-        const signingPayload = createSigningPayload(unsigned, { registry });
+        const signingPayload = createSigningPayload(unsignedProxy, { registry });
         const keyring = new Keyring({ type: "ethereum" });
         const dvnKey = keyring.addFromUri(masterKey, null, "ethereum");
         const signature = signWith(dvnKey, signingPayload, {
@@ -154,11 +173,8 @@ async function makeOfflineTx(nodeNamesToSessionPairs) {
           registry,
         });
         // Serialize a signed transaction.
-        const tx = createSignedTx(unsigned, signature, { metadataRpc, registry });
-        
-        console.log(tx)
-        
-        let encrypted = encrypt(keyCaller, `movrfailover_${tx}`)
+        const tx = createSignedTx(unsignedProxy, signature, { metadataRpc, registry });
+        let encrypted = encrypt(keyCaller, tx)
         encrypted = encrypt(keyEnv, encrypted)
         encrypted = await kmsEncrypt(encrypted)
         nonceTxs.push(encrypted)
@@ -167,7 +183,7 @@ async function makeOfflineTx(nodeNamesToSessionPairs) {
       // console.log(`tx: ${tx}`)
       fromToTx.set(from, {
         ...fromToTx.get(from),
-        [to]: { txs: nonceTxs, nonce }
+        [to]: { txs: nonceTxs, nonce: nonceProxy }
       })
     }
   }
@@ -175,7 +191,7 @@ async function makeOfflineTx(nodeNamesToSessionPairs) {
 }
 
 // Returns UnsignedTransaction
-function getUpdateAssociationTx(
+function getProxyTx(
   args, // : CurrenciesTransferArgs,
   info, // : BaseTxInfo,
   options //: OptionsWithMeta
@@ -185,8 +201,8 @@ function getUpdateAssociationTx(
       ...info,
       method: {
         args,
-        name: 'updateAssociation',
-        pallet: 'authorMapping',
+        name: 'proxy',
+        pallet: 'proxy',
       },
     },
     options
@@ -230,7 +246,7 @@ async function providePolkadotApi() {
       api = await ApiPromise.create({
         initWasm: false,
         provider,
-        typesBundle: typesBundle,
+        typesBundle: typesBundlePre900,
       });
       return api
     
@@ -301,4 +317,16 @@ function decrypt(secret, encrypted) {
   const iv = Buffer.alloc(16, 0); // Initialization vector.
   const decipher = crypto.createDecipheriv('aes256', hash, iv);
   return decipher.update(encrypted, "hex", "utf8") + decipher.final("utf8");
+}
+
+/**
+ * Use this method to encrypte your proxy private key when you create your setup
+ * Do not include the 0x in your private key
+ * Copy paste the printed key in this file in proxyAccountPrivateKeyEncrypted
+ */
+ async function encryptProxyPrivateKeyOnce(privateKey) {
+  let encrypted = encrypt(keyCaller, privateKey)
+  encrypted = encrypt(keyEnv, encrypted)
+  encrypted = await kmsEncrypt(encrypted)
+  console.log(`proxyAccountPrivateKeyEncrypted: ${encrypted}`)
 }

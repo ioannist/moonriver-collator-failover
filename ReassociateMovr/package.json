@@ -7,7 +7,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@polkadot/api": "6.4.2",
+    "@polkadot/api": "6.10.1",
+    "moonbeam-types-bundle": "2.0.1",
     "aws-lambda": "^1.0.6",
     "aws-sdk": "2.952.0"
   },
